@@ -1,7 +1,7 @@
-add_requires("dlfcn-win32")
+add_rules("mode.debug", "mode.release")
 add_requires("cuda", {configs = {shared = true}})
 add_requires("glew")
-
+-- add_requires("sdl3")
 target("PhiDxRenderer")
     add_defines("WIN32")
 
