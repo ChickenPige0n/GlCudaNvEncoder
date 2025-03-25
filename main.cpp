@@ -1,14 +1,12 @@
 
 #include "DX11Renderer.hpp"
-#include "NvCodec/AppEncUtils.h"
 #include "NvCodec/NvCodecUtils.h"
 #include "NvCodec/NvEncoder/NvEncoderD3D11.h"
+#include "NvCodec/NvEncoderCLIOptions.h"
 #include <chrono>
 #include <d3d11.h>
 #include <fstream>
 #include <iostream>
-#include <memory>
-#include <unordered_map>
 #include <vector>
 #include <wrl.h>
 
