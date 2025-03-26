@@ -15,10 +15,37 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <thread>
+
+#ifndef ERROR
+#define ERROR -1
+#endif
+
+#ifndef LOG
+// Define LOG as a class to handle both direct printf-style and stream
+// operations
+class LogMessage {
+public:
+  LogMessage(int severity) : severity_(severity) {}
+  ~LogMessage() { std::cout << stream_.str() << std::endl; }
+  std::ostringstream &stream() { return stream_; }
+
+private:
+  int severity_;
+  std::ostringstream stream_;
+};
+
+#define LOG_INFO 0
+#define LOG_WARNING 1
+#define LOG_ERROR 2
+#define LOG_FATAL 3
+
+#define LOG(severity) LogMessage(LOG_##severity).stream()
+#endif
 
 #ifdef __cuda_cuda_h__
 inline bool check(CUresult e, int iLine, const char *szFile) {
