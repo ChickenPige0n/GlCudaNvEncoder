@@ -18,7 +18,7 @@ The library provides a simple C interface to encode OpenGL textures directly int
 ### Initialize Encoder
 
 ```c
-EncoderState* phi_create_encoder(int width, int height, const char* output_path, int gpu_id);
+EncoderState* gcne_create_encoder(int width, int height, const char* output_path, int gpu_id);
 ```
 
 Creates and initializes the video encoder.
@@ -34,7 +34,7 @@ Creates and initializes the video encoder.
 ### Register OpenGL Texture
 
 ```c
-int phi_register_texture(EncoderState* state, unsigned int texture_id);
+int gcne_register_texture(EncoderState* state, unsigned int texture_id);
 ```
 
 Registers an OpenGL texture for encoding.
@@ -48,7 +48,7 @@ Registers an OpenGL texture for encoding.
 ### Encode Frame
 
 ```c
-int phi_encode_frame(EncoderState* state);
+int gcne_encode_frame(EncoderState* state);
 ```
 
 Encodes the current content of the registered texture.
@@ -61,7 +61,7 @@ Encodes the current content of the registered texture.
 ### Cleanup Resources
 
 ```c
-int phi_destroy_encoder(EncoderState* state);
+int gcne_destroy_encoder(EncoderState* state);
 ```
 
 Finalizes encoding and cleans up resources.
@@ -75,14 +75,14 @@ Finalizes encoding and cleans up resources.
 
 ```c
 // Create encoder (1280x720 video output to "output.h264" using GPU 0)
-EncoderState* encoder = phi_create_encoder(1280, 720, "output.h264", 0);
+EncoderState* encoder = gcne_create_encoder(1280, 720, "output.h264", 0);
 if (!encoder) {
 	// Handle error
 }
 
 // Register your OpenGL texture
 GLuint textureId = ...; // Your OpenGL texture
-phi_register_texture(encoder, textureId);
+gcne_register_texture(encoder, textureId);
 
 // In render loop
 while (rendering) {
@@ -90,11 +90,11 @@ while (rendering) {
 	// ...
 	
 	// Encode the current frame
-	phi_encode_frame(encoder);
+	gcne_encode_frame(encoder);
 }
 
 // Clean up
-phi_destroy_encoder(encoder);
+gcne_destroy_encoder(encoder);
 ```
 
 ## Error Handling
