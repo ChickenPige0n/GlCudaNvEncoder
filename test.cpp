@@ -2,6 +2,7 @@
 #include "NvCodec/NvEncoderCLIOptions.h"
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
+#include <cstring>
 #include <cuda.h>
 #include <cuda_gl_interop.h>
 #include <fstream>
@@ -34,84 +35,151 @@ RegisterTextureFunc gcne_register_texture = nullptr;
 EncodeFrameFunc gcne_encode_frame = nullptr;
 DestroyEncoderFunc gcne_destroy_encoder = nullptr;
 
-// Create a texture with RGB columns and top half blank
-GLuint createTestTexture(int width, int height) {
+// Create a shader program to generate the texture pattern on GPU
+GLuint createShaderProgram() {
+  const char *vertexShaderSource = "#version 330 core\n"
+                                   "layout (location = 0) in vec3 aPos;\n"
+                                   "layout (location = 1) in vec2 aTexCoord;\n"
+                                   "out vec2 TexCoord;\n"
+                                   "void main() {\n"
+                                   "   gl_Position = vec4(aPos, 1.0);\n"
+                                   "   TexCoord = aTexCoord;\n"
+                                   "}\n";
+
+  const char *fragmentShaderSource =
+      "#version 330 core\n"
+      "out vec4 FragColor;\n"
+      "in vec2 TexCoord;\n"
+      "uniform int frameCount;\n"
+      "void main() {\n"
+      "   // Animation based on frameCount\n"
+      "   float color = mod(floor(TexCoord.x * 32) + floor(TexCoord.y * 32) + "
+      "frameCount, 2.0);\n"
+      "   // Create pattern similar to the original\n"
+      "   if (TexCoord.y < 0.5) {\n"
+      "       FragColor = vec4(0.0, 0.0, 0.0, 1.0);\n"
+      "   } else {\n"
+      "       if (TexCoord.x < 0.33) {\n"
+      "           FragColor = vec4(color, TexCoord.x * 3.0, TexCoord.y, 1.0);\n"
+      "       } else if (TexCoord.x < 0.66) {\n"
+      "           FragColor = vec4(TexCoord.x * 1.5, color, TexCoord.y, 1.0);\n"
+      "       } else {\n"
+      "           FragColor = vec4(TexCoord.x, TexCoord.y, color, 1.0);\n"
+      "       }\n"
+      "   }\n"
+      "}\n";
+
+  // Compile vertex shader
+  GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
+  glShaderSource(vertexShader, 1, &vertexShaderSource, NULL);
+  glCompileShader(vertexShader);
+
+  // Check for vertex shader compilation errors
+  int success;
+  char infoLog[512];
+  glGetShaderiv(vertexShader, GL_COMPILE_STATUS, &success);
+  if (!success) {
+    glGetShaderInfoLog(vertexShader, 512, NULL, infoLog);
+    fprintf(stderr, "ERROR::SHADER::VERTEX::COMPILATION_FAILED\n%s\n", infoLog);
+  }
+
+  // Compile fragment shader
+  GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+  glShaderSource(fragmentShader, 1, &fragmentShaderSource, NULL);
+  glCompileShader(fragmentShader);
+
+  // Check for fragment shader compilation errors
+  glGetShaderiv(fragmentShader, GL_COMPILE_STATUS, &success);
+  if (!success) {
+    glGetShaderInfoLog(fragmentShader, 512, NULL, infoLog);
+    fprintf(stderr, "ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n%s\n",
+            infoLog);
+  }
+
+  // Link shaders into a shader program
+  GLuint shaderProgram = glCreateProgram();
+  glAttachShader(shaderProgram, vertexShader);
+  glAttachShader(shaderProgram, fragmentShader);
+  glLinkProgram(shaderProgram);
+
+  // Check for shader program linking errors
+  glGetProgramiv(shaderProgram, GL_LINK_STATUS, &success);
+  if (!success) {
+    glGetProgramInfoLog(shaderProgram, 512, NULL, infoLog);
+    fprintf(stderr, "ERROR::SHADER::PROGRAM::LINKING_FAILED\n%s\n", infoLog);
+  }
+
+  glDeleteShader(vertexShader);
+  glDeleteShader(fragmentShader);
+
+  return shaderProgram;
+}
+
+// Setup quad for rendering to texture
+void setupQuad(GLuint &VAO, GLuint &VBO, GLuint &EBO) {
+  float vertices[] = {
+      // positions          // texture coords
+      1.0f,  1.0f,  0.0f, 1.0f, 1.0f, // top right
+      1.0f,  -1.0f, 0.0f, 1.0f, 0.0f, // bottom right
+      -1.0f, -1.0f, 0.0f, 0.0f, 0.0f, // bottom left
+      -1.0f, 1.0f,  0.0f, 0.0f, 1.0f  // top left
+  };
+  unsigned int indices[] = {
+      0, 1, 3, // first triangle
+      1, 2, 3  // second triangle
+  };
+
+  glGenVertexArrays(1, &VAO);
+  glGenBuffers(1, &VBO);
+  glGenBuffers(1, &EBO);
+
+  glBindVertexArray(VAO);
+
+  glBindBuffer(GL_ARRAY_BUFFER, VBO);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices,
+               GL_STATIC_DRAW);
+
+  // position attribute
+  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)0);
+  glEnableVertexAttribArray(0);
+  // texture coord attribute
+  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float),
+                        (void *)(3 * sizeof(float)));
+  glEnableVertexAttribArray(1);
+
+  glBindVertexArray(0);
+}
+
+// Create a texture for rendering
+GLuint createRenderTexture(int width, int height) {
   GLuint textureId;
   glGenTextures(1, &textureId);
   glBindTexture(GL_TEXTURE_2D, textureId);
 
-  // Create a pattern with left=red, middle=green, right=blue, top half blank
-  unsigned char *data = (unsigned char *)malloc(width * height * 4);
-  for (int y = 0; y < height; y++) {
-    for (int x = 0; x < width; x++) {
-      // Top half is blank (black)
-      if (y < height / 2) {
-        data[(y * width + x) * 4 + 0] = 0; // R
-        data[(y * width + x) * 4 + 1] = 0; // G
-        data[(y * width + x) * 4 + 2] = 0; // B
-      }
-      // Bottom half has RGB columns
-      else {
-        // Left third is red
-        if (x < width / 3) {
-          data[(y * width + x) * 4 + 0] = 255; // R
-          data[(y * width + x) * 4 + 1] = 0;   // G
-          data[(y * width + x) * 4 + 2] = 0;   // B
-        }
-        // Middle third is green
-        else if (x < 2 * width / 3) {
-          data[(y * width + x) * 4 + 0] = 0;   // R
-          data[(y * width + x) * 4 + 1] = 255; // G
-          data[(y * width + x) * 4 + 2] = 0;   // B
-        }
-        // Right third is blue
-        else {
-          data[(y * width + x) * 4 + 0] = 0;   // R
-          data[(y * width + x) * 4 + 1] = 0;   // G
-          data[(y * width + x) * 4 + 2] = 255; // B
-        }
-      }
-      data[(y * width + x) * 4 + 3] = 255; // A (always fully opaque)
-    }
-  }
-
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,
-               GL_UNSIGNED_BYTE, data);
+               GL_UNSIGNED_BYTE, NULL);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  free(data);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
   return textureId;
 }
 
-// Create a texture with a simple pattern
-// GLuint createTestTexture(int width, int height) {
-//   GLuint textureId;
-//   glGenTextures(1, &textureId);
-//   glBindTexture(GL_TEXTURE_2D, textureId);
+int main(int argc, char **argv) {
+  bool use_ffmpeg = false;
 
-//   // Create a simple checkerboard pattern
-//   unsigned char *data = (unsigned char *)malloc(width * height * 4);
-//   for (int y = 0; y < height; y++) {
-//     for (int x = 0; x < width; x++) {
-//       unsigned char color = ((x / 32) + (y / 32)) % 2 ? 255 : 0;
-//       data[(y * width + x) * 4 + 0] = color;              // R
-//       data[(y * width + x) * 4 + 1] = (x * 255) / width;  // G
-//       data[(y * width + x) * 4 + 2] = (y * 255) / height; // B
-//       data[(y * width + x) * 4 + 3] = 255;                // A
-//     }
-//   }
+  // Parse command line arguments
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "-ffmpeg") == 0) {
+      use_ffmpeg = true;
+      printf("FFmpeg mode enabled\n");
+    }
+  }
 
-//   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,
-//                GL_UNSIGNED_BYTE, data);
-//   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-//   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-//   free(data);
-
-//   return textureId;
-// }
-
-int main() {
   // Initialize GLFW and create a window
   if (!glfwInit()) {
     fprintf(stderr, "Failed to initialize GLFW\n");
@@ -127,24 +195,30 @@ int main() {
   }
 
   // Get function pointers
-  gcne_create_encoder =
-      (CreateEncoderFunc)GetProcAddress(dllHandle, "gcne_create_encoder");
-  gcne_register_texture =
-      (RegisterTextureFunc)GetProcAddress(dllHandle, "gcne_register_texture");
-  gcne_encode_frame =
-      (EncodeFrameFunc)GetProcAddress(dllHandle, "gcne_encode_frame");
-  gcne_destroy_encoder =
-      (DestroyEncoderFunc)GetProcAddress(dllHandle, "gcne_destroy_encoder");
+  if (!use_ffmpeg) {
+    gcne_create_encoder =
+        (CreateEncoderFunc)GetProcAddress(dllHandle, "gcne_create_encoder");
+    gcne_register_texture =
+        (RegisterTextureFunc)GetProcAddress(dllHandle, "gcne_register_texture");
+    gcne_encode_frame =
+        (EncodeFrameFunc)GetProcAddress(dllHandle, "gcne_encode_frame");
+    gcne_destroy_encoder =
+        (DestroyEncoderFunc)GetProcAddress(dllHandle, "gcne_destroy_encoder");
 
-  // Check if all functions were found
-  if (!gcne_create_encoder || !gcne_register_texture || !gcne_encode_frame ||
-      !gcne_destroy_encoder) { // Similarly, add error code reporting when
-                               // GetProcAddress fails
-    DWORD error = GetLastError();
-    fprintf(stderr, "Failed to get function pointers from DLL\n");
-    FreeLibrary(dllHandle);
-    return -1;
+    // Check if all functions were found
+    if (!gcne_create_encoder || !gcne_register_texture || !gcne_encode_frame ||
+        !gcne_destroy_encoder) {
+      DWORD error = GetLastError();
+      fprintf(stderr, "Failed to get function pointers from DLL\n");
+      FreeLibrary(dllHandle);
+      return -1;
+    }
   }
+
+  // Set OpenGL context version
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+  glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
   // Create a windowed mode window and its OpenGL context
   GLFWwindow *window =
@@ -159,60 +233,138 @@ int main() {
   glfwMakeContextCurrent(window);
 
   // Initialize GLEW
+  glewExperimental = GL_TRUE;
   if (glewInit() != GLEW_OK) {
     fprintf(stderr, "Failed to initialize GLEW\n");
     return -1;
   }
 
   // Video dimensions
-  const int width = 640;
-  const int height = 480;
+  // 4k resolution
+  const int width = 3840;
+  const int height = 2160;
+  // log video dimensions
+  printf("Video dimensions: %dx%d\n", width, height);
+  const int byte_size = width * height * 4;
+
+  // Create shader program
+  GLuint shaderProgram = createShaderProgram();
+
+  // Create quad for rendering
+  GLuint quadVAO, quadVBO, quadEBO;
+  setupQuad(quadVAO, quadVBO, quadEBO);
 
   // Create a test texture
-  GLuint textureId = createTestTexture(width, height);
+  GLuint textureId = createRenderTexture(width, height);
 
-  // Create encoder
-  printf("Creating encoder...\n");
-  EncoderState *encoder =
-      gcne_create_encoder(width, height, "test_output.h264", 0);
-  if (!encoder) {
-    fprintf(stderr, "Failed to create encoder\n");
+  // Create a framebuffer
+  GLuint fbo;
+  glGenFramebuffers(1, &fbo);
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                         textureId, 0);
+
+  // Check framebuffer completeness
+  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+    fprintf(stderr, "Framebuffer is not complete!\n");
     return -1;
   }
 
-  // Register texture with encoder
-  printf("Registering texture...\n");
-  if (gcne_register_texture(encoder, textureId) != 0) {
-    fprintf(stderr, "Failed to register texture\n");
-    gcne_destroy_encoder(encoder);
-    return -1;
+  // Setup for encoder or FFmpeg
+  EncoderState *encoder = nullptr;
+  FILE *ffmpeg_pipe = nullptr;
+  const int N = 60; // Number of PBOs to use
+  GLuint pbos[N] = {0};
+
+  if (use_ffmpeg) {
+    // Initialize PBOs for FFmpeg mode
+    glGenBuffers(N, pbos);
+    for (int i = 0; i < N; i++) {
+      glBindBuffer(GL_PIXEL_PACK_BUFFER, pbos[i]);
+      glBufferData(GL_PIXEL_PACK_BUFFER, byte_size, NULL, GL_STREAM_READ);
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+
+    // Open pipe to FFmpeg
+    char ffmpeg_cmd[512];
+    snprintf(ffmpeg_cmd, sizeof(ffmpeg_cmd),
+             "ffmpeg -y -f rawvideo -vcodec rawvideo -pix_fmt rgba "
+             "-s %dx%d -r 30 -i - -c:v h264_nvenc -preset fast -crf 18 "
+             "-pix_fmt yuv420p ffmpeg_output.mp4 -loglevel error -stats "
+             "2>ffmpeg_log.txt",
+             width, height);
+
+    printf("Starting FFmpeg with command: %s\n", ffmpeg_cmd);
+    ffmpeg_pipe = _popen(ffmpeg_cmd, "wb");
+    if (!ffmpeg_pipe) {
+      fprintf(stderr, "Failed to open FFmpeg pipe\n");
+      return -1;
+    }
+  } else {
+    // Create encoder
+    printf("Creating encoder...\n");
+    encoder = gcne_create_encoder(width, height, "test_output.h264", 0);
+    if (!encoder) {
+      fprintf(stderr, "Failed to create encoder\n");
+      return -1;
+    }
+
+    // Register texture with encoder
+    printf("Registering texture...\n");
+    if (gcne_register_texture(encoder, textureId) != 0) {
+      fprintf(stderr, "Failed to register texture\n");
+      gcne_destroy_encoder(encoder);
+      return -1;
+    }
   }
 
-  // Encode 100 frames
-  printf("Encoding 100 frames...\n");
+  // Encode 1000 frames
+  printf("Encoding 1000 frames...\n");
   std::chrono::time_point<std::chrono::high_resolution_clock> start =
       std::chrono::high_resolution_clock::now();
-  for (int i = 0; i < 1000; i++) {
-    // Update texture content (simple animation)
-    glBindTexture(GL_TEXTURE_2D, textureId);
-    unsigned char *data = (unsigned char *)malloc(width * height * 4);
-    for (int y = 0; y < height; y++) {
-      for (int x = 0; x < width; x++) {
-        unsigned char color = ((x / 32) + (y / 32) + i) % 2 ? 255 : 0;
-        data[(y * width + x) * 4 + 0] = color;
-        data[(y * width + x) * 4 + 1] = (x * 255) / width;
-        data[(y * width + x) * 4 + 2] = (y * 255) / height;
-        data[(y * width + x) * 4 + 3] = 255;
-      }
-    }
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA,
-                    GL_UNSIGNED_BYTE, data);
-    free(data);
 
-    // Encode frame
-    if (gcne_encode_frame(encoder) != 0) {
-      fprintf(stderr, "Failed to encode frame %d\n", i);
-      break;
+  for (int i = 0; i < 1000; i++) {
+    // Bind the framebuffer for rendering to texture
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glViewport(0, 0, width, height);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    // Use shader and set uniforms
+    glUseProgram(shaderProgram);
+    glUniform1i(glGetUniformLocation(shaderProgram, "frameCount"), i);
+
+    // Render the quad with our texture
+    glBindVertexArray(quadVAO);
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+    glBindVertexArray(0);
+
+    // Make sure rendering is complete before encoding
+    glFinish();
+
+    if (use_ffmpeg) {
+      // Read pixels to PBO
+      glBindBuffer(GL_PIXEL_PACK_BUFFER, pbos[i % N]);
+      glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, 0);
+
+      // Map previous PBO and write to FFmpeg
+      int prev_idx = (i + 1) % N;
+      if (i >= N - 1) { // Only start reading after we've filled the pipeline
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, pbos[prev_idx]);
+        void *ptr = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+        if (ptr) {
+          fwrite(ptr, 1, byte_size, ffmpeg_pipe);
+          glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+        }
+      }
+
+      glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    } else {
+      // Encode frame using NvEncoder
+      if (gcne_encode_frame(encoder) != 0) {
+        fprintf(stderr, "Failed to encode frame %d\n", i);
+        break;
+      }
     }
 
     printf("Frame %d encoded\r", i);
@@ -234,11 +386,38 @@ int main() {
   printf("FPS: %f\n", 1000 / elapsed.count());
 
   // Clean up
-  printf("Destroying encoder...\n");
-  gcne_destroy_encoder(encoder);
+  if (use_ffmpeg) {
+    // Process any remaining PBOs
+    for (int i = 0; i < N; i++) {
+      glBindBuffer(GL_PIXEL_PACK_BUFFER, pbos[i]);
+      void *ptr = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+      if (ptr) {
+        fwrite(ptr, 1, byte_size, ffmpeg_pipe);
+        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+      }
+    }
+
+    // Clean up PBOs
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glDeleteBuffers(N, pbos);
+
+    // Close FFmpeg pipe
+    printf("Closing FFmpeg pipe...\n");
+    _pclose(ffmpeg_pipe);
+  } else {
+    // Clean up encoder
+    printf("Destroying encoder...\n");
+    gcne_destroy_encoder(encoder);
+  }
 
   // Clean up OpenGL resources
   glDeleteTextures(1, &textureId);
+  glDeleteProgram(shaderProgram);
+  glDeleteVertexArrays(1, &quadVAO);
+  glDeleteBuffers(1, &quadVBO);
+  glDeleteBuffers(1, &quadEBO);
+  glDeleteFramebuffers(1, &fbo);
+
   glfwTerminate();
 
   printf("Test completed successfully\n");
