@@ -6,7 +6,7 @@ target("GlCudaNvEncoder")
     add_defines("WIN32")
 
     set_kind("shared")
-    add_files("*.cpp")
+    add_files("main.cpp")
 
     -- Add CUDA include path
     add_includedirs(".", "NvCodec")
@@ -26,3 +26,13 @@ target("GlCudaNvEncoder")
     add_syslinks("opengl32")
     
     add_syslinks("d3d11", "dxgi")
+
+target("testGCNE")
+    set_kind("binary")
+    add_packages("glew", "glfw")
+        add_includedirs(".", "NvCodec")
+    add_includedirs("$(env CUDA_PATH)/include")
+
+    add_linkdirs("NvCodec/Lib/x64", "$(env CUDA_PATH)/lib/x64")
+    add_links("nvcuvid", "cuda", "cudart")
+    add_files("test.cpp")
