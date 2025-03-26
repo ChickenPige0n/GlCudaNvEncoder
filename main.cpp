@@ -9,6 +9,13 @@
 #include <memory>
 #include <vector>
 
+// Define export macro for DLL
+#ifdef _WIN32
+#define GCNE_API __declspec(dllexport)
+#else
+#define GCNE_API __attribute__((visibility("default")))
+#endif
+
 // Structure to hold encoder state
 struct EncoderState {
   CUcontext cuContext;
@@ -23,21 +30,23 @@ struct EncoderState {
 // Export C interface
 extern "C" {
 // Create and initialize the encoder
-EncoderState *gcne_create_encoder(int width, int height,
-                                  const char *output_path, int gpu_id);
+GCNE_API EncoderState *gcne_create_encoder(int width, int height,
+                                           const char *output_path, int gpu_id);
 
 // Register an existing GL texture with the encoder
-int gcne_register_texture(EncoderState *state, unsigned int texture_id);
+GCNE_API int gcne_register_texture(EncoderState *state,
+                                   unsigned int texture_id);
 
 // Encode a frame from the registered texture
-int gcne_encode_frame(EncoderState *state);
+GCNE_API int gcne_encode_frame(EncoderState *state);
 
 // Finalize encoding and clean up resources
-int gcne_destroy_encoder(EncoderState *state);
+GCNE_API int gcne_destroy_encoder(EncoderState *state);
 }
 
-EncoderState *gcne_create_encoder(int width, int height,
-                                  const char *output_path, int gpu_id) {
+GCNE_API EncoderState *gcne_create_encoder(int width, int height,
+                                           const char *output_path,
+                                           int gpu_id) {
   EncoderState *state = new EncoderState();
   state->width = width;
   state->height = height;
@@ -82,7 +91,8 @@ EncoderState *gcne_create_encoder(int width, int height,
   }
 }
 
-int gcne_register_texture(EncoderState *state, unsigned int texture_id) {
+GCNE_API int gcne_register_texture(EncoderState *state,
+                                   unsigned int texture_id) {
   if (!state || !state->initialized)
     return -1;
 
@@ -105,7 +115,7 @@ int gcne_register_texture(EncoderState *state, unsigned int texture_id) {
   }
 }
 
-int gcne_encode_frame(EncoderState *state) {
+GCNE_API int gcne_encode_frame(EncoderState *state) {
   if (!state || !state->initialized)
     return -1;
 
@@ -155,7 +165,7 @@ int gcne_encode_frame(EncoderState *state) {
   }
 }
 
-int gcne_destroy_encoder(EncoderState *state) {
+GCNE_API int gcne_destroy_encoder(EncoderState *state) {
   if (!state)
     return -1;
 
