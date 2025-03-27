@@ -100,3 +100,9 @@ gcne_destroy_encoder(encoder);
 ## Error Handling
 
 All functions return error codes that should be checked. The library logs detailed error messages to stderr when operations fail.
+
+
+## TODO:
+1. Add pixel format specification to prevent RGB/BGR confusion in output video
+2. Implement automatic horizontal frame inversion filter
+3. Investigate and resolve seeking issues in the output video files
