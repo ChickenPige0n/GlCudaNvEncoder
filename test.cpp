@@ -1,17 +1,15 @@
 #include "NvCodec/NvEncoder/NvEncoderCuda.h"
-#include "NvCodec/NvEncoderCLIOptions.h"
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
+#include <chrono>
 #include <cstring>
 #include <cuda.h>
 #include <cuda_gl_interop.h>
 #include <fstream>
-#include <iostream>
 #include <libloaderapi.h>
 #include <memory>
 #include <stdio.h>
 #include <stdlib.h>
-#include <vector>
 
 // Structure to hold encoder state
 struct EncoderState {
@@ -35,6 +33,22 @@ RegisterTextureFunc gcne_register_texture = nullptr;
 EncodeFrameFunc gcne_encode_frame = nullptr;
 DestroyEncoderFunc gcne_destroy_encoder = nullptr;
 
+std::string loadShaderFromFile(const std::string &filePath) {
+  std::ifstream shaderFile;
+  std::stringstream shaderStream;
+
+  shaderFile.exceptions(std::ifstream::failbit | std::ifstream::badbit);
+  try {
+    shaderFile.open(filePath);
+    shaderStream << shaderFile.rdbuf();
+    shaderFile.close();
+    return shaderStream.str();
+  } catch (std::ifstream::failure &e) {
+    std::cerr << "ERROR::SHADER::FILE_NOT_SUCCESSFULLY_READ: " << e.what()
+              << std::endl;
+    return "";
+  }
+}
 // Create a shader program to generate the texture pattern on GPU
 GLuint createShaderProgram() {
   const char *vertexShaderSource = "#version 330 core\n"
@@ -45,31 +59,10 @@ GLuint createShaderProgram() {
                                    "   gl_Position = vec4(aPos, 1.0);\n"
                                    "   TexCoord = aTexCoord;\n"
                                    "}\n";
+  // 使用示例
+  std::string fragmentShaderString = loadShaderFromFile("shader.frag");
+  const char *fragmentShaderSource = fragmentShaderString.c_str();
 
-  const char *fragmentShaderSource =
-      "#version 330 core\n"
-      "out vec4 FragColor;\n"
-      "in vec2 TexCoord;\n"
-      "uniform int frameCount;\n"
-      "void main() {\n"
-      "   // Animation based on frameCount\n"
-      "   float color = mod(floor(TexCoord.x * 32) + floor(TexCoord.y * 32) + "
-      "frameCount, 2.0);\n"
-      "   // Create pattern similar to the original\n"
-      "   if (TexCoord.y < 0.5) {\n"
-      "       FragColor = vec4(0.0, 0.0, 0.0, 1.0);\n"
-      "   } else {\n"
-      "       if (TexCoord.x < 0.33) {\n"
-      "           FragColor = vec4(color, TexCoord.x * 3.0, TexCoord.y, 1.0);\n"
-      "       } else if (TexCoord.x < 0.66) {\n"
-      "           FragColor = vec4(TexCoord.x * 1.5, color, TexCoord.y, 1.0);\n"
-      "       } else {\n"
-      "           FragColor = vec4(TexCoord.x, TexCoord.y, color, 1.0);\n"
-      "       }\n"
-      "   }\n"
-      "}\n";
-
-  // Compile vertex shader
   GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
   glShaderSource(vertexShader, 1, &vertexShaderSource, NULL);
   glCompileShader(vertexShader);
@@ -171,12 +164,21 @@ GLuint createRenderTexture(int width, int height) {
 
 int main(int argc, char **argv) {
   bool use_ffmpeg = false;
-
+  int duration = 10; // sec
   // Parse command line arguments
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "-ffmpeg") == 0) {
       use_ffmpeg = true;
       printf("FFmpeg mode enabled\n");
+    }
+    if (strcmp(argv[i], "-duration") == 0) {
+      if (i + 1 < argc) {
+        duration = atoi(argv[i + 1]);
+        printf("Duration set to %d seconds\n", duration);
+      } else {
+        fprintf(stderr, "Missing argument for -duration\n");
+        return 0;
+      }
     }
   }
 
@@ -289,7 +291,7 @@ int main(int argc, char **argv) {
     char ffmpeg_cmd[512];
     snprintf(ffmpeg_cmd, sizeof(ffmpeg_cmd),
              "ffmpeg -y -f rawvideo -vcodec rawvideo -pix_fmt rgba "
-             "-s %dx%d -r 30 -i - -c:v h264_nvenc -preset fast -crf 18 "
+             "-s %dx%d -r 60 -i - -c:v h264_nvenc -preset fast -crf 18 "
              "-pix_fmt yuv420p ffmpeg_output.mp4 -loglevel error -stats "
              "2>ffmpeg_log.txt",
              width, height);
@@ -318,26 +320,30 @@ int main(int argc, char **argv) {
     }
   }
 
-  // Encode 1000 frames
-  printf("Encoding 1000 frames...\n");
+  // Encode duration * 60 frames
+
+  printf("Encoding %d frames...\n", duration * 60);
   std::chrono::time_point<std::chrono::high_resolution_clock> start =
       std::chrono::high_resolution_clock::now();
 
-  for (int i = 0; i < 1000; i++) {
+  for (int i = 0; i < duration * 60; i++) {
     // Bind the framebuffer for rendering to texture
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glViewport(0, 0, width, height);
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
     // Use shader and set uniforms
     glUseProgram(shaderProgram);
     glUniform1i(glGetUniformLocation(shaderProgram, "frameCount"), i);
+    float aspectRatio = (float)width / (float)height;
+    glUniform1f(glGetUniformLocation(shaderProgram, "aspectRatio"),
+                aspectRatio);
+    glUniform1i(glGetUniformLocation(shaderProgram, "useFFmpeg"),
+                use_ffmpeg ? 1 : 0);
 
-    // Render the quad with our texture
+    // Draw the quad with our shader
     glBindVertexArray(quadVAO);
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-    glBindVertexArray(0);
 
     // Make sure rendering is complete before encoding
     glFinish();
@@ -383,7 +389,7 @@ int main(int argc, char **argv) {
       std::chrono::high_resolution_clock::now();
   std::chrono::duration<double> elapsed = end - start;
   printf("Elapsed time: %f seconds\n", elapsed.count());
-  printf("FPS: %f\n", 1000 / elapsed.count());
+  printf("FPS: %f\n", (duration * 60) / elapsed.count());
 
   // Clean up
   if (use_ffmpeg) {
@@ -408,6 +414,16 @@ int main(int argc, char **argv) {
     // Clean up encoder
     printf("Destroying encoder...\n");
     gcne_destroy_encoder(encoder);
+
+    // call ffmpeg -i .\test_output.h264 -c:v copy -y .\test_output-nvenc.mp4
+    // to convert the h264 file to mp4
+    char ffmpeg_cmd[512];
+    snprintf(
+        ffmpeg_cmd, sizeof(ffmpeg_cmd),
+        "ffmpeg -i test_output.h264 -c:v copy -y -r 60 test_output-nvenc.mp4 "
+        "2>ffmpeg_log_repack.txt");
+    printf("Converting to MP4 with command: %s\n", ffmpeg_cmd);
+    system(ffmpeg_cmd);
   }
 
   // Clean up OpenGL resources
