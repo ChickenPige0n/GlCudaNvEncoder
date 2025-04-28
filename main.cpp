@@ -4,7 +4,6 @@
 #include <GLFW/glfw3.h>
 #include <cuda.h>
 #include <cuda_gl_interop.h>
-#include <fstream>
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -21,32 +20,33 @@ struct EncoderState {
     CUcontext cuContext;
     cudaGraphicsResource_t cudaResource;
     std::unique_ptr<NvEncoderCuda> encoder;
-    std::ofstream outputFile;
     int width;
     int height;
     bool initialized;
 };
-
 // Export C interface
 extern "C" {
 // Create and initialize the encoder
-GCNE_API EncoderState *gcne_create_encoder(int width, int height,
-                                           const char *output_path, int gpu_id);
+GCNE_API EncoderState *gcne_create_encoder(int width, int height, int gpu_id);
 
 // Register an existing GL texture with the encoder
 GCNE_API int gcne_register_texture(EncoderState *state,
                                    unsigned int texture_id);
 
-// Encode a frame from the registered texture
-GCNE_API int gcne_encode_frame(EncoderState *state);
+// Encode a frame from the registered texture and return the packet data
+GCNE_API int gcne_encode_frame(EncoderState *state, unsigned char **packet_data,
+                               int *packet_size);
 
-// Finalize encoding and clean up resources
-GCNE_API int gcne_destroy_encoder(EncoderState *state);
+// Finalize encoding and return any remaining packets
+GCNE_API int gcne_destroy_encoder(EncoderState *state,
+                                  unsigned char **packet_data,
+                                  int *packet_size);
+
+// Free packet data allocated by the encoder
+GCNE_API void gcne_free_packet(unsigned char *packet_data);
 }
 
-GCNE_API EncoderState *gcne_create_encoder(int width, int height,
-                                           const char *output_path,
-                                           int gpu_id) {
+GCNE_API EncoderState *gcne_create_encoder(int width, int height, int gpu_id) {
     EncoderState *state = new EncoderState();
     state->width = width;
     state->height = height;
@@ -67,29 +67,18 @@ GCNE_API EncoderState *gcne_create_encoder(int width, int height,
             NV_ENC_INITIALIZE_PARAMS_VER};
         NV_ENC_CONFIG encodeConfig = {NV_ENC_CONFIG_VER};
         initializeParams.encodeConfig = &encodeConfig;
+
         state->encoder->CreateDefaultEncoderParams(
             &initializeParams, encodeCLIOptions.GetEncodeGUID(),
             encodeCLIOptions.GetPresetGUID());
-    // Set up encoding parameters
-    NvEncoderInitParam encodeCLIOptions;
-    NV_ENC_INITIALIZE_PARAMS initializeParams = {NV_ENC_INITIALIZE_PARAMS_VER};
-    NV_ENC_CONFIG encodeConfig = {NV_ENC_CONFIG_VER};
-    initializeParams.encodeConfig = &encodeConfig;
 
-    state->encoder->CreateDefaultEncoderParams(
-        &initializeParams, encodeCLIOptions.GetEncodeGUID(),
-        encodeCLIOptions.GetPresetGUID());
+        // 设置帧间隔 (GOP Size)
+        initializeParams.encodeConfig->gopLength = 20;
+        initializeParams.encodeConfig->frameIntervalP = 3;
 
         encodeCLIOptions.SetInitParams(&initializeParams,
                                        NV_ENC_BUFFER_FORMAT_ABGR);
         state->encoder->CreateEncoder(&initializeParams);
-
-        // Open output file
-        state->outputFile.open(output_path, std::ios::out | std::ios::binary);
-        if (!state->outputFile) {
-            delete state;
-            return nullptr;
-        }
 
         state->initialized = true;
         return state;
@@ -124,7 +113,8 @@ GCNE_API int gcne_register_texture(EncoderState *state,
     }
 }
 
-GCNE_API int gcne_encode_frame(EncoderState *state) {
+GCNE_API int gcne_encode_frame(EncoderState *state, unsigned char **packet_data,
+                               int *packet_size) {
     if (!state || !state->initialized)
         return -1;
 
@@ -161,10 +151,27 @@ GCNE_API int gcne_encode_frame(EncoderState *state) {
         // Encode frame
         state->encoder->EncodeFrame(vPacket);
 
-        // Write packets to file
-        for (std::vector<uint8_t> &packet : vPacket) {
-            state->outputFile.write(reinterpret_cast<char *>(packet.data()),
-                                    packet.size());
+        // 合并所有数据包为一个连续缓冲区
+        if (vPacket.size() > 0) {
+            // 计算总大小
+            size_t total_size = 0;
+            for (const auto &packet : vPacket) {
+                total_size += packet.size();
+            }
+
+            // 分配内存
+            *packet_data = new unsigned char[total_size];
+            *packet_size = static_cast<int>(total_size);
+
+            // 复制数据
+            size_t offset = 0;
+            for (const auto &packet : vPacket) {
+                memcpy(*packet_data + offset, packet.data(), packet.size());
+                offset += packet.size();
+            }
+        } else {
+            *packet_data = nullptr;
+            *packet_size = 0;
         }
 
         return 0;
@@ -173,9 +180,10 @@ GCNE_API int gcne_encode_frame(EncoderState *state) {
         return -1;
     }
 }
+
 GCNE_API int gcne_destroy_encoder(EncoderState *state,
-                                  unsigned char **packet_data, int *packet_size,
-                                  int *num_packets) {
+                                  unsigned char **packet_data,
+                                  int *packet_size) {
     if (!state)
         return -1;
 
@@ -185,43 +193,31 @@ GCNE_API int gcne_destroy_encoder(EncoderState *state,
             std::vector<std::vector<uint8_t>> vPacket;
             state->encoder->EndEncode(vPacket);
 
-            // Write remaining packets to file
-            for (std::vector<uint8_t> &packet : vPacket) {
-                state->outputFile.write(reinterpret_cast<char *>(packet.data()),
-                                        packet.size());
-            }
-
-            // Return packets to caller if pointers are provided
-            if (packet_data && packet_size && num_packets) {
-                *num_packets = vPacket.size();
-
-                if (*num_packets > 0) {
-                    // Calculate total size
-                    size_t total_size = 0;
-                    for (const auto &packet : vPacket) {
-                        total_size += packet.size();
-                    }
-
-                    // Allocate memory
-                    *packet_data = new unsigned char[total_size];
-                    *packet_size = static_cast<int>(total_size);
-
-                    // Copy data
-                    size_t offset = 0;
-                    for (const auto &packet : vPacket) {
-                        memcpy(*packet_data + offset, packet.data(),
-                               packet.size());
-                        offset += packet.size();
-                    }
-                } else {
-                    *packet_data = nullptr;
-                    *packet_size = 0;
+            // 合并所有数据包为一个连续缓冲区
+            if (packet_data && packet_size && vPacket.size() > 0) {
+                // 计算总大小
+                size_t total_size = 0;
+                for (const auto &packet : vPacket) {
+                    total_size += packet.size();
                 }
+
+                // 分配内存
+                *packet_data = new unsigned char[total_size];
+                *packet_size = static_cast<int>(total_size);
+
+                // 复制数据
+                size_t offset = 0;
+                for (const auto &packet : vPacket) {
+                    memcpy(*packet_data + offset, packet.data(), packet.size());
+                    offset += packet.size();
+                }
+            } else if (packet_data && packet_size) {
+                *packet_data = nullptr;
+                *packet_size = 0;
             }
 
             // Clean up resources
             state->encoder->DestroyEncoder();
-            state->outputFile.close();
 
             // Unregister CUDA resource if needed
             if (state->cudaResource) {
@@ -237,5 +233,12 @@ GCNE_API int gcne_destroy_encoder(EncoderState *state,
     } catch (const std::exception &e) {
         std::cerr << "Error destroying encoder: " << e.what() << std::endl;
         return -1;
+    }
+}
+
+
+GCNE_API void gcne_free_packet(unsigned char *packet_data) {
+    if (packet_data) {
+        delete[] packet_data;
     }
 }
