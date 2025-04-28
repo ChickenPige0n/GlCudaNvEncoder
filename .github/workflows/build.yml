@@ -1,0 +1,108 @@
+name: Build GlCudaNvEncoder
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        submodules: recursive
+    
+    # 安装CUDA
+    - name: Install CUDA
+      uses: Jimver/cuda-toolkit@v0.2.11
+      id: cuda-toolkit
+      with:
+        cuda: '12.0.0'
+        method: 'network'
+        sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
+    
+    # 安装xmake
+    - name: Setup xmake
+      uses: xmake-io/github-action-setup-xmake@v1
+      with:
+        xmake-version: latest
+    
+    # 安装依赖项 (GLEW 和 GLFW)
+    - name: Install dependencies with xmake
+      run: |
+        xmake repo --update
+        xmake require --yes glew glfw
+    
+    # 配置项目
+    - name: Configure
+      run: xmake config --mode=release --yes
+    
+    # 构建项目
+    - name: Build
+      run: xmake build
+    
+    # 上传构建产物
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: windows-release-binaries
+        path: |
+          build/windows/x64/release/GlCudaNvEncoder.dll
+          build/windows/x64/release/testGCNE.exe
+          build/windows/x64/release/*.lib
+          build/windows/x64/release/*.exp
+
+  build-linux:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        submodules: recursive
+    
+    # 安装必要的Linux依赖
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev
+    
+    # 安装CUDA
+    - name: Install CUDA
+      uses: Jimver/cuda-toolkit@v0.2.11
+      id: cuda-toolkit
+      with:
+        cuda: '12.0.0'
+        method: 'network'
+        sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust"]'
+    
+    # 安装xmake
+    - name: Setup xmake
+      uses: xmake-io/github-action-setup-xmake@v1
+      with:
+        xmake-version: latest
+    
+    # 安装依赖项 (GLEW 和 GLFW)
+    - name: Install dependencies with xmake
+      run: |
+        xmake repo --update
+        xmake require --yes glew glfw
+    
+    # 配置项目
+    - name: Configure
+      run: xmake config --mode=release --yes
+    
+    # 构建项目
+    - name: Build
+      run: xmake build
+    
+    # 上传构建产物
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: linux-release-binaries
+        path: |
+          build/linux/x86_64/release/libGlCudaNvEncoder.so
+          build/linux/x86_64/release/testGCNE
