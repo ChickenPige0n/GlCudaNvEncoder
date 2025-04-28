@@ -11,7 +11,7 @@ jobs:
     runs-on: windows-latest
     
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
       with:
         submodules: recursive
     
@@ -44,9 +44,9 @@ jobs:
     - name: Build
       run: xmake build
     
-    # 上传构建产物
+    # 上传构建产物 - 升级到 v4
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: windows-release-binaries
         path: |
@@ -59,7 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
       with:
         submodules: recursive
     
@@ -98,9 +98,9 @@ jobs:
     - name: Build
       run: xmake build
     
-    # 上传构建产物
+    # 上传构建产物 - 升级到 v4
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: linux-release-binaries
         path: |
