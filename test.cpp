@@ -243,8 +243,8 @@ int main(int argc, char **argv) {
 
   // Video dimensions
   // 4k resolution
-  const int width = 3840;
-  const int height = 2160;
+  const int width = 1920;
+  const int height = 1080;
   // log video dimensions
   printf("Video dimensions: %dx%d\n", width, height);
   const int byte_size = width * height * 4;
